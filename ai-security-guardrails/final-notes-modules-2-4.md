@@ -131,6 +131,70 @@ Plus the retriever is role-filtered (top-3) using `users.yaml`.
     - **Fail closed:** if the judge returns nothing usable, ingestion stops.
     - Spans not actually in the text are ignored (no hallucinated replacements); longest spans replaced first.
 
+### PII detection — the three methods (regex → NER → LLM-as-a-judge)
+
+> The course repo's code only implements method 3. Methods 1 and 2 are taught in the video (Presidio and spaCy are installed in `Module_3/requirements.txt`), so this section describes the standard approach.
+
+**One-line memory trick:** regex finds **formats**, NER finds **entity types**, the LLM judge understands **context**.
+
+#### Method 1 — Regex (pattern matching)
+
+Looks for text that matches a fixed pattern.
+
+| PII | Example pattern |
+| --- | --- |
+| PAN | `[A-Z]{5}[0-9]{4}[A-Z]` (e.g. ABCDE1234F) |
+| Aadhaar | `\d{4}\s?\d{4}\s?\d{4}` (12 digits) |
+| Indian mobile | `(\+91[\s-]?)?[6-9]\d{9}` |
+| Email | `[\w.+-]+@[\w-]+\.[\w.]+` |
+| Card number | 13–19 digits, then check with the Luhn algorithm |
+
+- **Good:** very fast, free, runs locally, always gives the same answer, easy to explain.
+- **Misses:** anything without a fixed format, such as names, addresses and medical conditions.
+- **Mistakes:** false positives (any 12-digit number looks like Aadhaar) and misses when people type it differently ("98765 43210", "PAN: abcde1234f").
+
+#### Method 2 — NER (Named Entity Recognition)
+
+A trained ML model reads the sentence and labels words by entity type: PERSON, LOCATION (GPE/LOC), ORGANIZATION, DATE.
+
+- **Tools:**
+    - **spaCy** (`en_core_web_sm`) — the NER model.
+    - **Microsoft Presidio** — combines regex recognizers + spaCy NER + nearby context words ("PAN:", "phone"), and gives each finding a **confidence score**.
+        - `presidio-analyzer` finds the PII.
+        - `presidio-anonymizer` replaces it, e.g. "Priya Malhotra" → `<PERSON>`.
+- **Good:** finds names and places that have no fixed format; runs locally; cheap.
+- **Misses:** unusual or Indian names the model wasn't trained on, words with double meaning (a product called "Mercury" vs a person), and PII that isn't a classic entity (a health condition, a reason for a visit). Needs a tuned confidence threshold.
+
+#### Method 3 — LLM-as-a-judge
+
+An LLM reads the text and returns a list of PII spans with their type (structured output). This is what `app_2_judge_masked_rag.py` does.
+
+- **Good:** understands context (knows the bank's own helpline number is *not* customer PII), catches unusual PII, handles messy or mixed-language text.
+- **Costs and risks:**
+    - Slower, and costs money per document.
+    - Not deterministic.
+    - Can be prompt-injected → wrap the text in `<data>` tags.
+    - Can invent spans → check each span really exists in the text.
+
+#### Comparing the three
+
+| | Regex | NER (spaCy / Presidio) | LLM-as-a-judge |
+| --- | --- | --- | --- |
+| Finds | Fixed formats (PAN, Aadhaar, phone, email, card) | Names, places, organizations, dates | Anything, using context |
+| Speed / cost | Fastest, free | Fast, free (local) | Slowest, paid |
+| Same answer every time? | Yes | Yes | No |
+| Understands context? | No | A little | Yes |
+| Main weakness | No format = missed | Unknown names, ambiguity | Cost, injection, hallucinated spans |
+
+#### Using them together (layered pipeline)
+
+1. **Regex first** — catch fixed-format PII cheaply and with certainty.
+2. **NER next** — catch names and places.
+3. **LLM judge last** — catch what the first two missed, and decide ambiguous cases.
+4. Merge all the spans found, replace the **longest spans first**, and **fail closed** (if a step errors, don't store the text).
+
+This is defense in depth: cheap deterministic checks do most of the work, and the expensive LLM is used only where context is needed.
+
 ### Video 3 — Securing the retriever: authentication & authorization
 
 - **Before:** a flat retriever over every document — anyone can retrieve HR salary bands or the CEO-only *Project Falcon* acquisition memo.
